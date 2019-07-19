@@ -1,26 +1,41 @@
-﻿using Grib.Api.Interop.SWIG;
-using Grib.Api.Interop.Util;
+﻿// Copyright 2017 Eric Millin
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using Grib.Api.Interop.SWIG;
 using System;
-using System.Runtime.InteropServices;
 
 namespace Grib.Api.Interop
 {
-	/// <summary>
-	/// Logging handler.
-	/// </summary>
-	/// <param name="lvl">The level.</param>
-	/// <param name="msg">The MSG.</param>
-	public delegate void GribApiLogHandler (int lvl, string msg);
-
     /// <summary>
     /// Wraps grib_context struct.
     /// </summary>
     public class GribContext : AutoRef
     {
-		/// <summary>
-		/// Occurs when the grib_api library logs a message.
-		/// </summary>
-		public event GribApiLogHandler OnLog;
+		public static GribContext Default
+        {
+            get
+            {
+                if (_default == null)
+                {
+                    GribEnvironment.Init();
+                    _default = GribApiProxy.GribContextGetDefault();
+                }
+                return _default;
+            }
+
+        }
+        private static GribContext _default = null;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="GribContext"/> class.
@@ -29,7 +44,6 @@ namespace Grib.Api.Interop
         public GribContext (IntPtr h)
             : base(h)
         {
-			GribApiNative.GribSetContextLogger(h, this.OnLogReceived);
         }
 
         /// <summary>
@@ -42,22 +56,8 @@ namespace Grib.Api.Interop
             // GribApiProxy.GribContextDelete(this);
         }
 
-		/// <summary>
-		/// Called when [log received].
-		/// </summary>
-		/// <param name="ctx">The grib_context generating the log.</param>
-		/// <param name="lvl">The level.</param>
-		/// <param name="msg">The MSG.</param>
-		private void OnLogReceived(IntPtr ctx, int lvl, [MarshalAs(UnmanagedType.LPStr)]string msg)
-		{
-			if (this.OnLog != null)
-			{
-				this.OnLog(lvl, msg);
-			}
-		}
-
         /// <summary>
-        /// Gets or sets a value indicating whether [enable multiple field messages].
+        /// Gets or sets a value indicating whether to [enable multiple field messages]. grib_api documentation discourages use of this feature.
         /// </summary>
         /// <value>
         /// <c>true</c> if [enable multiple field messages]; otherwise, <c>false</c>.

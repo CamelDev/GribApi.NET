@@ -1,4 +1,4 @@
-﻿// Copyright 2015 Eric Millin
+﻿// Copyright 2017 Eric Millin
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,16 +19,20 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Diagnostics;
+using System.IO;
+using System.Text;
 
 namespace Grib.Api
 {
     /// <summary>
     /// Grib message object. Each grib message has attributes corresponding to grib message keys for GRIB1 and GRIB2.
     /// Parameter names are are given by the name, shortName and paramID keys. When iterated, returns instances of the
-    /// <seealso cref="Grib.Api.GribValue"/> class.
+    /// <seealso cref="Grib.Api.GribKeyValue"/> class.
     /// </summary>
-    public class GribMessage: IEnumerable<GribValue>
+    public class GribMessage : IEnumerable<GribKeyValue>, IDisposable
     {
+        private static readonly object _fileLock = new object();
+
         private static readonly string[] _ignoreKeys = { "zero","one","eight","eleven","false","thousand","file",
                        "localDir","7777","oneThousand" };
 
@@ -38,19 +42,39 @@ namespace Grib.Api
         /// </summary>
         public static readonly string[] Namespaces = { "all", "ls", "parameter", "statistics", "time", "geography", "vertical", "mars" };
 
+        internal GCHandle BufferHandle;
+
+        static GribMessage ()
+        {
+            GribEnvironment.Init();
+        }
+
         /// <summary>
         /// Initializes a new instance of the <see cref="GribMessage" /> class.
         /// </summary>
         /// <param name="handle">The handle.</param>
         /// <param name="context">The context.</param>
         /// <param name="index">The index.</param>
-        protected GribMessage (GribHandle handle, GribContext context = null, int index = 0)
-            : base()
+        protected GribMessage (GribHandle handle, GribContext context, int index = 0)
+            : this(handle, context, new GCHandle(), index)
+        {
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="GribMessage" /> class.
+        /// </summary>
+        /// <param name="handle"></param>
+        /// <param name="context"></param>
+        /// <param name="buffer"></param>
+        /// <param name="index"></param>
+        protected GribMessage (GribHandle handle, GribContext context, GCHandle buffer, int index = 0)
+    : base()
         {
             Handle = handle;
             Namespace = Namespaces[0];
             KeyFilters = Interop.KeyFilters.All;
             Index = index;
+            BufferHandle = buffer;
         }
 
         /// <summary>
@@ -59,12 +83,12 @@ namespace Grib.Api
         /// <returns>
         /// A <see cref="T:System.Collections.Generic.IEnumerator`1" /> that can be used to iterate through the collection.
         /// </returns>
-        public IEnumerator<GribValue> GetEnumerator ()
+        public IEnumerator<GribKeyValue> GetEnumerator ()
         {
             // null returns keys from all namespaces
             string nspace = Namespace == "all" ? null : Namespace;
 
-            using (var keyIter = GribKeysIterator.Create(Handle, (uint) KeyFilters, nspace))
+            using (var keyIter = GribKeysIterator.Create(Handle, (uint)KeyFilters, nspace))
             {
                 while (keyIter.Next())
                 {
@@ -90,14 +114,14 @@ namespace Grib.Api
         }
 
         /// <summary>
-        /// Clones this instance.
+        /// Creates a shallow copy of this instance.
         /// </summary>
         /// <returns></returns>
-        public GribMessage Clone()
+        public GribMessage Copy ()
         {
             var newHandle = GribApiProxy.GribHandleClone(this.Handle);
 
-            return new GribMessage(newHandle);
+            return new GribMessage(newHandle, GribContext.Default);
         }
 
         /// <summary>
@@ -106,12 +130,17 @@ namespace Grib.Api
         /// <param name="file">The file.</param>
         /// <param name="index">The index.</param>
         /// <returns></returns>
-        public static GribMessage Create(GribFile file, int index) 
+        public static GribMessage Create (GribFile file, int index)
         {
             GribMessage msg = null;
+            GribHandle handle = null;
             int err = 0;
-            // grib_api moves to the next message in a stream for each new handle
-            GribHandle handle = GribApiProxy.GribHandleNewFromFile(file.Context, file, out err);
+
+            lock (_fileLock)
+            {
+                // grib_api moves to the next message in a stream for each new handle
+                handle = GribApiProxy.GribHandleNewFromFile(file.Context, file, out err);
+            }
 
             if (err != 0)
             {
@@ -127,6 +156,37 @@ namespace Grib.Api
         }
 
         /// <summary>
+        /// Creates a GribMessage instance from a buffer.
+        /// </summary>
+        /// <param name="bits"></param>
+        /// <param name="index"></param>
+        /// <returns></returns>
+        public static GribMessage Create (byte[] bits, int index = 0)
+        {
+            GCHandle h = GCHandle.Alloc(bits, GCHandleType.Pinned);
+            IntPtr pHandle = h.AddrOfPinnedObject();
+
+            int err = 0;
+            SizeT sz = (SizeT)bits.Length;
+            GribHandle handle = GribApiProxy.GribHandleNewFromMultiMessage(GribContext.Default, out pHandle, ref sz, out err);
+
+            if (err != 0)
+            {
+                h.Free();
+                throw GribApiException.Create(err);
+            }
+
+            GribMessage msg = null;
+
+            if (handle != null)
+            {
+                msg = new GribMessage(handle, GribContext.Default, h, index);
+            }
+
+            return msg;
+        }
+ 
+        /// <summary>
         /// Returns a <see cref="System.String" /> containing metadata about this instance.
         /// </summary>
         /// <returns>
@@ -138,7 +198,64 @@ namespace Grib.Api
             string stepType = this["stepType"].AsString();
             string timeQaulifier = stepType == "avg" ? String.Format("({0})", stepType) : "";
 
-            return String.Format("{0}:[{10}] \"{1}\" ({2}):{3}:{4} {5}:fcst time {6} {7}s {8}:from {9}", Index, Name, StepType, GridType, TypeOfLevel, Level, StepRange, "hr", timeQaulifier, Time.ToString("yyyy-MM-dd HHmm"), ShortName);
+            return String.Format("{0}:[{10}] \"{1}\" ({2}):{3}:{4} {5}:fcst time {6} {7}s {8}:from {9}", Index, ParameterName, StepType, GridType,
+                                  TypeOfLevel, Level, StepRange, "hr", timeQaulifier, Time.ToString("yyyy-MM-dd HH:mm:ss"), this.ParameterShortName);
+        }
+
+        /// <summary>
+        /// Returns a pretty-printed list of the message key-value pairs.
+        /// </summary>
+        /// <returns>Stringified key-value pairs.</returns>
+        public string Dump ()
+        {
+            List<string> keys = new List<string>();
+            foreach (var key in this)
+            {
+                if (key.IsDefined)
+                {
+                    keys.Add(key.ToString());
+                }
+            }
+
+            return String.Join(Environment.NewLine, keys);
+        }
+
+        /// <summary>
+        /// Dumps the message values to a csv file. The first line is the column names.
+        /// </summary>
+        /// <param name="stream"></param>
+        /// <param name="includeMissing"></param>
+        public void WriteValuesToCsv (Stream stream, bool includeMissing = false)
+        {
+            // write column headers
+            var bytes = Encoding.UTF8.GetBytes("Time0,Time1,Field,Level,Longitude,Latitude,Grib Value\n");
+            stream.Write(bytes, 0, bytes.Length);
+
+            foreach (var v in this.GridCoordinateValues)
+            {
+                if (!includeMissing && v.IsMissing) { continue; }
+
+                // "time0","time1","field","level",longitude,latitude,grid-value
+                var line = String.Format("\"{0}\",\"{1}\",\"{2}\",\"{3}\",{4},{5},{6}\n", this.ReferenceTime.ToString("yyyy-MM-dd HH:mm:ss"),
+                                         this.Time.ToString("yyyy-MM-dd HH:mm:ss"), this.ParameterName, this.Level, v.Longitude, v.Latitude, v.Value);
+                bytes = Encoding.ASCII.GetBytes(line);
+                stream.Write(bytes, 0, bytes.Length);
+                stream.Flush();
+            }
+        }
+        /// <summary>
+        /// Dumps the message values to a csv file. The first line is the column names.
+        /// </summary>
+        /// <param name="filePath"></param>
+        /// <param name="mode"></param>
+        /// <param name="includeMissing"></param>
+        public void WriteValuesToCsv (string filePath, FileMode mode = FileMode.Create, bool includeMissing = false)
+        {
+            using (var fs = File.Open(filePath, mode))
+            {
+                this.WriteValuesToCsv(fs, includeMissing);
+                fs.Flush();
+            }
         }
 
         /// <summary>
@@ -152,7 +269,7 @@ namespace Grib.Api
         /// this on the native side.
         /// </remarks>
         /// <param name="values">The values.</param>
-        public void Values(out double[] values)
+        public void Values (out double[] values)
         {
             values = this["values"].AsDoubleArray();
         }
@@ -161,9 +278,32 @@ namespace Grib.Api
         /// Sets the raw data associated with this message. The array is *copied*.
         /// </summary>
         /// <param name="values">The values.</param>
-        public void SetValues(double[] values)
+        public void SetValues (double[] values)
         {
             this["values"].AsDoubleArray(values);
+        }
+
+        /// <summary>
+        /// Find the nearest four points to a coordinate.
+        /// </summary>
+        /// <param name="latitude">The reference latitude.</param>
+        /// <param name="longitude">The reference longitude.</param>
+        /// <param name="searchType">The type of search to perform. Bitwise "or-able".</param>
+        /// <returns>An array of the nearest four coordinates sorted by distance.</returns>
+        public GridNearestCoordinate[] FindNearestCoordinates (double latitude, double longitude, GribNearestToSame searchType = GribNearestToSame.POINT)
+        {
+            return this.Nearest.FindNearestCoordinates(latitude, longitude, searchType);
+        }
+
+        /// <summary>
+        /// Find the nearest four points to a coordinate.
+        /// </summary>
+        /// <param name="coord">The reference coordinate.</param>
+        /// <param name="searchType">The type of search to perform. Bitwise "or-able".</param>
+        /// <returns>An array of the nearest four coordinates sorted by distance.</returns>
+        public GridNearestCoordinate[] FindNearestCoordinates (IGridCoordinate coord, GribNearestToSame searchType = GribNearestToSame.POINT)
+        {
+            return this.FindNearestCoordinates(coord.Latitude, coord.Longitude, searchType);
         }
 
         #region Properties
@@ -174,9 +314,39 @@ namespace Grib.Api
         /// <value>
         /// The name.
         /// </value>
+        [Obsolete("This API is deprecated. Please use ParameterName instead.", false)]
         public string Name
         {
-            get { return this["parameterName"].AsString(); }
+            get
+            {
+                return this.ParameterName;
+            }
+        }
+
+        /// <summary>
+        /// Gets the parameter name.
+        /// </summary>
+        /// <value>
+        /// The name.
+        /// </value>
+        public string ParameterName
+        {
+            get
+            {
+                if (GribKeyValue.IsKeyDefined(this.Handle, "parameterName"))
+                {
+                    return this["parameterName"].AsString();
+                }
+                else if (GribKeyValue.IsKeyDefined(this.Handle, "name"))
+                {
+                    return this["name"].AsString();
+                }
+                else if (GribKeyValue.IsKeyDefined(this.Handle, "nameECMF"))
+                {
+                    return this["nameECMF"].AsString();
+                }
+                return null;
+            }
         }
 
         /// <summary>
@@ -185,45 +355,71 @@ namespace Grib.Api
         /// <value>
         /// The short name.
         /// </value>
+        [Obsolete("This API is deprecated. Please use ParameterShortName instead.", false)]
         public string ShortName
         {
-            get { return this["shortName"].AsString(); }
+            get
+            {
+                return this.ParameterShortName;
+            }
         }
 
-		/// <summary>
-		/// Gets the GRIB specification edition. grib_api does not always correctly identify the edition, in which case this property return 0.
-		/// </summary>
-		public int Edition
-		{
-			get
-			{
-				if (this._ed == -1)
-				{
-					string gen = this["GRIBEditionNumber"].AsString();
+        /// <summary>
+        /// Gets the parameter's short name.
+        /// </summary>
+        /// <value>
+        /// The short name.
+        /// </value>
+        public string ParameterShortName
+        {
+            get
+            {
+                if (GribKeyValue.IsKeyDefined(this.Handle, "shortName"))
+                {
+                    return this["shortName"].AsString();
+                }
+                else if (GribKeyValue.IsKeyDefined(this.Handle, "shortNameECMF"))
+                {
+                    return this["shortNameECMF"].AsString();
+                }
+                return null;
+            }
+        }
 
-					if (!Int32.TryParse(gen, out this._ed))
-					{
-						gen = this["editionNumber"].AsString();
+        /// <summary>
+        /// Gets the GRIB specification edition. grib_api does not always correctly identify the edition, in which case this property return 0.
+        /// </summary>
+        public int Edition
+        {
+            get
+            {
+                if (this._ed == -1)
+                {
+                    string gen = this["GRIBEditionNumber"].AsString();
 
-						if (!Int32.TryParse(gen, out this._ed))
-						{
-							this._ed = 0;
-						}
-					}
-				}
+                    if (!Int32.TryParse(gen, out this._ed))
+                    {
+                        gen = this["editionNumber"].AsString();
 
-				// allow for GRIB N?
-				if (this._ed < 0)
-				{
-					throw new GribApiException("Bad GRIB edition.");
-				}
+                        if (!Int32.TryParse(gen, out this._ed))
+                        {
+                            this._ed = 0;
+                        }
+                    }
+                }
 
-				Debug.Assert(this._ed < 3);
+                // allow for GRIB N?
+                if (this._ed < 0)
+                {
+                    throw new GribApiException("Bad GRIB edition.");
+                }
 
-				return this._ed;
-			}
-		}
-		private int _ed = -1;
+                Debug.Assert(this._ed < 4);
+
+                return this._ed;
+            }
+        }
+        private int _ed = -1;
 
         /// <summary>
         /// Gets or sets the parameter number.
@@ -233,8 +429,38 @@ namespace Grib.Api
         /// </value>
         public int ParameterNumber
         {
-            get { return this["parameterNumber"].AsInt(); }
-            set { this["parameterNumber"].AsInt(value); }
+            get
+            {
+                if (GribKeyValue.IsKeyDefined(this.Handle, "parameterNumber"))
+                {
+                    return this["parameterNumber"].AsInt();
+                }
+                else if (GribKeyValue.IsKeyDefined(this.Handle, "paramId"))
+                {
+                    return this["paramId"].AsInt();
+                }
+                else if (GribKeyValue.IsKeyDefined(this.Handle, "paramIdECMF"))
+                {
+                    return this["paramIdECMF"].AsInt();
+                }
+                return 0;
+            }
+
+            set
+            {
+                if (GribKeyValue.IsKeyDefined(this.Handle, "parameterNumber"))
+                {
+                    this["parameterNumber"].AsInt(value);
+                }
+                else if (GribKeyValue.IsKeyDefined(this.Handle, "paramId"))
+                {
+                    this["paramId"].AsInt(value);
+                }
+                else
+                {
+                    throw GribApiException.Create(10);
+                }
+            }
         }
 
         /// <summary>
@@ -243,39 +469,69 @@ namespace Grib.Api
         /// <value>
         /// The units.
         /// </value>
+        [Obsolete("This API is deprecated. Please use ParameterUnits instead.", false)]
         public string Units
         {
-            get { return this["parameterUnits"].AsString(); }
+            get
+            {
+                return this.ParameterUnits;
+            }
         }
 
-		/// <summary>
-		/// Gets or sets the unit of the step. This will be the short name from the following table:
-		/// 
-		/// 0 m  Minute
-		/// 1 h  Hour
-		/// 2 D  Day
-		/// 3 M  Month
-		/// 4 Y  Year
-		/// 5 10Y  Decade (10 years)
-		/// 6 30Y  Normal (30 years)
-		/// 7 C  Century (100 years)
-		/// 10 3h  3 hours
-		/// 11 6h  6 hours
-		/// 12 12h  12 hours
-		/// 13 s  Second
-		/// 14 15m  15 minutes
-		/// 15 30m  30 minutes
-		/// 255 255  Missing
-		/// 
-		/// </summary>
-		/// <value>
-		/// The type of the step.
-		/// </value>
-		public string StepUnit
-		{
-			get { return this["stepUnits"].AsString(); }
-			set { this["stepUnits"].AsString(value); }
-		}
+        /// <summary>
+        /// Gets or sets the parameter units.
+        /// </summary>
+        /// <value>
+        /// The units.
+        /// </value>
+        public string ParameterUnits
+        {
+            get
+            {
+                if (GribKeyValue.IsKeyDefined(this.Handle, "parameterUnits"))
+                {
+                    return this["parameterUnits"].AsString();
+                }
+                else if (GribKeyValue.IsKeyDefined(this.Handle, "units"))
+                {
+                    return this["units"].AsString();
+                }
+                else if (GribKeyValue.IsKeyDefined(this.Handle, "unitsECMF"))
+                {
+                    return this["unitsECMF"].AsString();
+                }
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Gets or sets the unit of the step. This will be the short name from the following table:
+        /// 
+        /// 0 m  Minute
+        /// 1 h  Hour
+        /// 2 D  Day
+        /// 3 M  Month
+        /// 4 Y  Year
+        /// 5 10Y  Decade (10 years)
+        /// 6 30Y  Normal (30 years)
+        /// 7 C  Century (100 years)
+        /// 10 3h  3 hours
+        /// 11 6h  6 hours
+        /// 12 12h  12 hours
+        /// 13 s  Second
+        /// 14 15m  15 minutes
+        /// 15 30m  30 minutes
+        /// 255 255  Missing
+        /// 
+        /// </summary>
+        /// <value>
+        /// The type of the step.
+        /// </value>
+        public string StepUnit
+        {
+            get { return this["stepUnits"].AsString(); }
+            set { this["stepUnits"].AsString(value); }
+        }
 
         /// <summary>
         /// Gets or sets the type of the step.
@@ -361,33 +617,42 @@ namespace Grib.Api
             set { this["unitOfTimeRange"].AsString(value); }
         }
 
-		/// <summary>
-		/// Gets or set the *reference* time of the data - date and time of start of averaging or accumulation period. Time is UTC.
-		/// </summary>
-		/// <value>
-		/// The reference time.
-		/// </value>
-		public DateTime ReferenceTime
-		{
-			get
-			{
-				return new DateTime(this["year"].AsInt(), this["month"].AsInt(), this["day"].AsInt(),
-									this["hour"].AsInt(), this["minute"].AsInt(), this["second"].AsInt(),
-									DateTimeKind.Utc);
-			}
-			set
-			{
-				this["year"].AsInt(value.Year);
-				this["month"].AsInt(value.Month);
-				this["day"].AsInt(value.Day);
-				this["hour"].AsInt(value.Hour);
-				this["minute"].AsInt(value.Minute);
-				this["second"].AsInt(value.Second);
-			}
-		}
+        /// <summary>
+        /// Gets or set Time0, the *reference* time of the data - date and time of start of averaging or accumulation period. Time is UTC.
+        /// </summary>
+        /// <value>
+        /// The reference time.
+        /// </value>
+        public DateTime ReferenceTime
+        {
+            get
+            {
+                // some grib values do not require a date and this will throw; set a default value
+                var time = new DateTime(1, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+                try
+                {
+                    time = new DateTime(this["year"].AsInt(), this["month"].AsInt(), this["day"].AsInt(),
+                                    this["hour"].AsInt(), this["minute"].AsInt(), this["second"].AsInt(),
+                                    DateTimeKind.Utc);
+                }
+                catch (Exception) { }
+
+                return time;
+            }
+            set
+            {
+                this["year"].AsInt(value.Year);
+                this["month"].AsInt(value.Month);
+                this["day"].AsInt(value.Day);
+                this["hour"].AsInt(value.Hour);
+                this["minute"].AsInt(value.Minute);
+                this["second"].AsInt(value.Second);
+            }
+        }
 
         /// <summary>
-		/// Gets the beginning of the time interval, i.e., ReferenceTime + forecastTime or ReferenceTime + P2. Time is UTC.
+		/// Gets Time1, the beginning of the time interval, i.e., ReferenceTime + forecastTime or ReferenceTime + P2. Time is UTC.
 		/// If the time range indicator is greater than 5, ReferenceTime is returned.
         /// </summary>
         /// <value>
@@ -397,76 +662,96 @@ namespace Grib.Api
         {
             get
             {
-				string key = this["forecastTime"].IsDefined ? "forecastTime" : "P2";
+                string key = this["forecastTime"].IsDefined ? "forecastTime" : "P2";
 
-				return this.GetOffsetTime(key);
+                return this.GetOffsetTime(key);
             }
         }
 
-		private static readonly string[] _legalTimeArgs = new[] { "P1", "P2", "forecastTime" };
+        private static readonly string[] _legalTimeArgs = new[] { "P1", "P2", "forecastTime" };
 
-		private DateTime GetOffsetTime (string p)
-		{
+        private DateTime GetOffsetTime (string p)
+        {
 
-			if (!_legalTimeArgs.Contains(p))
-			{
-				throw new ArgumentException("Argument must be in " + _legalTimeArgs.ToString());
-			}
+            if (!_legalTimeArgs.Contains(p))
+            {
+                throw new ArgumentException("Argument must be in " + _legalTimeArgs.ToString());
+            }
 
-			DateTime time = this.ReferenceTime;
-			string units = this.TimeRangeUnit;
+            DateTime time = this.ReferenceTime;
+            string units = this.TimeRangeUnit;
 
-			if (String.IsNullOrWhiteSpace(units))
-			{
-				units = this.StepUnit;
-			}
+            if (String.IsNullOrWhiteSpace(units))
+            {
+                units = this.StepUnit;
+            }
 
-			int offset = this[p].AsInt();
-			int indicator = this["timeRangeIndicator"].AsInt();
+            int offset = this[p].AsInt();
+            int indicator = this["timeRangeIndicator"].AsInt();
 
-			if (units != "255" && offset != 0)
-			{
-				offset *= GetTimeMultiplier(units);
+            if (units != "255" && offset != 0)
+            {
+                offset *= GetTimeMultiplier(units);
 
-				if (units.EndsWith("s"))
-				{
-					time = time.AddSeconds(offset);
-				} else if (units.EndsWith("m"))
-				{
-					time = time.AddMinutes(offset);
-				} else if (units.EndsWith("h"))
-				{
-					time = time.AddHours(offset);
-				} else if (units.EndsWith("D"))
-				{
-					time = time.AddDays(offset);
-				} else if (units.EndsWith("M"))
-				{
-					time = time.AddMonths(offset);
-				} else if (units.EndsWith("Y"))
-				{
-					time = time.AddYears(offset);
-				} else if (units.EndsWith("C")) 
-				{
-					time = time.AddYears(100 * offset);
-				}
-			}
+                if (units.EndsWith("s"))
+                {
+                    time = time.AddSeconds(offset);
+                }
+                else if (units.EndsWith("m"))
+                {
+                    time = time.AddMinutes(offset);
+                }
+                else if (units.EndsWith("h"))
+                {
+                    time = time.AddHours(offset);
+                }
+                else if (units.EndsWith("D"))
+                {
+                    time = time.AddDays(offset);
+                }
+                else if (units.EndsWith("M"))
+                {
+                    time = time.AddMonths(offset);
+                }
+                else if (units.EndsWith("Y"))
+                {
+                    time = time.AddYears(offset);
+                }
+                else if (units.EndsWith("C"))
+                {
+                    time = time.AddYears(100 * offset);
+                }
+            }
 
-			return time;
-		}
+            return time;
+        }
 
-		private static int GetTimeMultiplier (string units)
-		{
-			int multiplier = 1;
+        private static int GetTimeMultiplier (string units)
+        {
+            int multiplier = 1;
 
-			if (units.Length > 1)
-			{
-				string val = units.Substring(0, units.Length - 2);
-				Int32.TryParse(val, out multiplier);
-			}
+            if (units.Length > 1)
+            {
+                string val = units.Substring(0, units.Length - 2);
+                Int32.TryParse(val, out multiplier);
+            }
 
-			return multiplier;
-		}
+            return multiplier;
+        }
+
+        protected GribNearest Nearest
+        {
+            get
+            {
+                if (_nearest == null)
+                {
+                    _nearest = GribNearest.Create(this.Handle);
+                }
+
+                return _nearest;
+            }
+        }
+        private GribNearest _nearest = null;
 
         /// <summary>
         /// The total number of points on the grid and includes missing as well as 'real' values. DataPointsCount = <see cref="ValuesCount"/> + <see cref="MissingCount"/>.
@@ -493,6 +778,20 @@ namespace Grib.Api
             get
             {
                 return this["numberOfCodedValues"].AsInt();
+            }
+        }
+
+        /// <summary>
+        /// This is the number of total values in the field.
+        /// </summary>
+        /// <value>
+        /// The values count.
+        /// </value>
+        public int ValuesTotal
+        {
+            get
+            {
+                return this["getNumberOfValues"].AsInt();
             }
         }
 
@@ -533,11 +832,11 @@ namespace Grib.Api
         /// <value>
         /// The missing value.
         /// </value>
-        public int MissingValue 
-        { 
+        public int MissingValue
+        {
             get
             {
-                return this["missingValue"].AsInt(); 
+                return this["missingValue"].AsInt();
             }
             set
             {
@@ -616,19 +915,28 @@ namespace Grib.Api
             }
         }
 
+        [Obsolete("This API is no longer supported. Please use GridCoordinateValues instead.", true)]
+        public IEnumerable<GeoSpatialValue> GeoSpatialValues
+        {
+            get
+            {
+                throw new NotImplementedException();
+            }
+        }
+
         /// <summary>
         /// Gets the messages values with coordinates.
         /// </summary>
         /// <value>
         /// The geo spatial values.
         /// </value>
-        public IEnumerable<GeoSpatialValue> GeoSpatialValues
+        public IEnumerable<GridCoordinateValue> GridCoordinateValues
         {
             get
             {
-                GeoSpatialValue gsVal;
+                GridCoordinateValue gsVal;
 
-                using (GribValuesIterator iter = GribValuesIterator.Create(Handle, (uint) KeyFilters))
+                using (GribCoordinateValuesIterator iter = GribCoordinateValuesIterator.Create(Handle, (uint)KeyFilters))
                 {
                     int mVal = this.MissingValue;
 
@@ -684,16 +992,55 @@ namespace Grib.Api
         #endregion Properties
 
         /// <summary>
-        /// Gets the <see cref="GribValue"/> with the specified key name.
+        /// Gets the <see cref="GribKeyValue"/> with the specified key name.
         /// </summary>
         /// <value>
-        /// The <see cref="GribValue"/>.
+        /// The <see cref="GribKeyValue"/>.
         /// </value>
         /// <param name="keyName">Name of the key.</param>
         /// <returns></returns>
-        public GribValue this[string keyName]
+        public GribKeyValue this[string keyName]
         {
-            get { return new GribValue(Handle, keyName); }
+            get { return new GribKeyValue(Handle, keyName); }
         }
+
+        #region IDisposable Support
+        public bool disposedValue = false; // To detect redundant calls
+
+        protected virtual void Dispose (bool disposing)
+        {
+            if (!disposedValue)
+            {
+                disposedValue = true;
+
+                if (this._nearest != null)
+                {
+                    this._nearest.Dispose();
+                }
+
+                if (this.BufferHandle.IsAllocated)
+                {
+                    SWIGTYPE_p_grib_multi_handle mh = new SWIGTYPE_p_grib_multi_handle(this.Handle.Reference.Handle, false);
+                    GribApiProxy.GribMultiHandleDelete(mh);
+                    this.BufferHandle.Free();
+                }
+            }
+        }
+
+        ~GribMessage ()
+        {
+            // Do not change this code. Put cleanup code in Dispose(bool disposing) above.
+            Dispose(false);
+        }
+
+        // This code added to correctly implement the disposable pattern.
+        public void Dispose ()
+        {
+            // Do not change this code. Put cleanup code in Dispose(bool disposing) above.
+            Dispose(true);
+            // TODO: uncomment the following line if the finalizer is overridden above.
+            GC.SuppressFinalize(this);
+        }
+        #endregion
     }
 }

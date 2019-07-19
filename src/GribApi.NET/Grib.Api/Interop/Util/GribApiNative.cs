@@ -15,20 +15,26 @@ namespace Grib.Api.Interop.Util
         [DllImport("Grib.Api.Native.dll")]
         internal static extern IntPtr CreateFileHandleProxy ([MarshalAs(UnmanagedType.LPStr)]string filename);
 
-        [DllImport("Grib.Api.Native.dll")]
+		[DllImport("Grib.Api.Native.dll")]
+		internal static extern void SetDefaultDefinitionsPath([MarshalAs(UnmanagedType.LPStr)]string path);
+
+		[DllImport("Grib.Api.Native.dll")]
         internal static extern void DestroyFileHandleProxy (IntPtr fileHandleProxy);
 
 		[DllImport("Grib.Api.Native.dll")]
-		internal static extern void RewindFileHandleProxy(IntPtr fileHandleProxy);
+		internal static extern void RewindFileHandleProxy (IntPtr fileHandleProxy);
 
         [DllImport("Grib.Api.Native.dll")]
-        internal static extern bool GribKeyIsReadOnly(HandleRef gribHandle, [MarshalAs(UnmanagedType.LPStr)]string keyName);
+        internal static extern bool GribKeyIsReadOnly (HandleRef gribHandle, [MarshalAs(UnmanagedType.LPStr)]string keyName);
 
-		[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-		internal delegate void GribLogProc(IntPtr gribContext, int level, [MarshalAs(UnmanagedType.LPStr)]string msg);
+		[DllImport("Grib.Api.Native.dll", CharSet = CharSet.Ansi)]
+		internal static extern void GetGribErrorMsg (int err, StringBuilder name);
 
-		[DllImport("Grib.Api.Native.dll", EntryPoint = "GribSetContextLogger")]
-		internal static extern void GribSetContextLogger(IntPtr gribContext, GribLogProc proc);
+		//[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+		//internal delegate void GribLogProc(IntPtr gribContext, int level, [MarshalAs(UnmanagedType.LPStr)]string msg);
+
+		//[DllImport("Grib.Api.Native.dll", EntryPoint = "GribSetContextLogger")]
+		//internal static extern void GribSetContextLogger(IntPtr gribContext, GribLogProc proc);
 
 		[DllImport("Grib.Api.Native.dll", EntryPoint = "GribSetOnFatal")]
 		internal static extern void GribSetOnFatal();
@@ -53,10 +59,10 @@ namespace Grib.Api.Interop.Util
 		private static extern
 			   void GribExceptionRegisterCallback(GribExceptionDelegate customCallback);
 
-
 		private static void OnGribFatalException([MarshalAs(UnmanagedType.LPStr)]string msg)
 		{
-			Grib.Api.Interop.SWIG.GribApiProxyPINVOKE.SWIGPendingException.Set(new GribApiFatalException(msg));
+			throw new GribApiFatalException(msg);
+			//Grib.Api.Interop.SWIG.GribApiProxyPINVOKE.SWIGPendingException.Set(new GribApiFatalException(msg));
 		}
 
 		internal static void HookGribExceptions()

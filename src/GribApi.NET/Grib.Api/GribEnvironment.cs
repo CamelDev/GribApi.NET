@@ -1,4 +1,4 @@
-﻿// Copyright 2015 Eric Millin
+﻿// Copyright 2017 Eric Millin
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,11 +16,8 @@ using Grib.Api.Interop;
 using Grib.Api.Interop.SWIG;
 using Grib.Api.Interop.Util;
 using System;
-using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
-using System.Reflection;
-using System.Runtime.InteropServices;
 
 namespace Grib.Api
 {
@@ -35,37 +32,48 @@ namespace Grib.Api
         private static AutoRef _libHandle;
         private static object _initLock = new object();
 
-		/// <summary>
-        /// Initializes GribApi.NET. In very rare cases, you may need to call this method directly
-        /// to ensure the native libraries are bootstrapped and the environment setup correctly.
-        /// </summary>
-        /// <exception cref="System.ComponentModel.Win32Exception"></exception>
-        public static void Init()
+
+        static GribEnvironment ()
         {
-            lock(_initLock)
+            if (Initialized) { return; }
+
+            lock (_initLock)
             {
-                if (Initialized) { return; }
-
                 Initialized = true;
-                string definitions = "";
 
-				if (String.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("GRIB_API_NO_ABORT"))) 
-				{
-					NoAbort = true;
-				}
-
-                if (String.IsNullOrWhiteSpace(DefinitionsPath) &&
-                    GribEnvironmentLoadHelper.TryFindDefinitions(out definitions))
+                if (String.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("GRIB_API_NO_ABORT")))
                 {
-                    DefinitionsPath = definitions;
-					SamplesPath = definitions.Remove(definitions.LastIndexOf("definitions")) + "samples";
+                    NoAbort = true;
                 }
 
-				AssertValidEnvironment();
-                _libHandle = GribEnvironmentLoadHelper.BootStrapLibrary();
+                string definitions = Environment.GetEnvironmentVariable("GRIB_DEFINITION_PATH");
+                if (String.IsNullOrWhiteSpace(definitions))
+                {
+                    GribEnvironmentLoadHelper.TryFindDefinitions(out definitions);
+                }
 
-				GribApiNative.HookGribExceptions();
+                AssertValidEnvironment(definitions);
+
+                _libHandle = GribEnvironmentLoadHelper.BootStrapLibrary();
+                GribApiNative.HookGribExceptions();
+
+                SamplesPath = definitions.Remove(definitions.LastIndexOf("definitions")) + "samples";
+                DefinitionsPath = definitions;
+
+                // grib_api discourages enabling multi-fields because they do not use them regularly and do not feel they
+                // are well-tested, however leaving them disabled has caused considerable confusion among users. 
+                GribContext.Default.EnableMultipleFieldMessages = true;
             }
+        }
+
+        /// <summary>
+        /// Hook to initialize GribApi.NET. In very rare cases, you may need to call this method directly
+        /// to ensure the native libraries are bootstrapped.
+        /// </summary>
+        /// <exception cref="System.ComponentModel.Win32Exception"></exception>
+        public static void Init ()
+        {
+            // empty hook for static ctor
         }
 
         /// <summary>
@@ -76,13 +84,13 @@ namespace Grib.Api
         /// or
         /// Could not locate 'definitions/boot.def'.
         /// </exception>
-        private static void AssertValidEnvironment ()
+        private static void AssertValidEnvironment (string definitions)
         {
-            string[] paths = GribEnvironment.DefinitionsPath.Split(new [] { ';' });
+            string[] paths = definitions.Split(new[] { ';' });
             string existingPath = "";
             bool exists = false;
 
-            foreach(string path in paths)
+            foreach (string path in paths)
             {
                 existingPath = path;
                 exists = Directory.Exists(path);
@@ -164,32 +172,33 @@ namespace Grib.Api
         {
             get
             {
-                return Environment.GetEnvironmentVariable("GRIB_DEFINITION_PATH") + "";
+                return _definitions;
             }
             set
             {
-                PutEnvVar("GRIB_DEFINITION_PATH", value);
+                GribApiNative.SetDefaultDefinitionsPath(value);
             }
         }
+        private static string _definitions = "";
 
 
-		/// <summary>
-		/// Gets or sets the location of grib_api's samples directory. By default, it is located  next to Grib.Api/definitions.
-		/// </summary>
-		/// <value>
-		/// The definitions path.
-		/// </value>
-		public static string SamplesPath
-		{
-			get
-			{
-				return Environment.GetEnvironmentVariable("GRIB_SAMPLES_PATH") + "";
-			}
-			set
-			{
-				PutEnvVar("GRIB_SAMPLES_PATH", value);
-			}
-		}
+        /// <summary>
+        /// Gets or sets the location of grib_api's samples directory. By default, it is located  next to Grib.Api/definitions.
+        /// </summary>
+        /// <value>
+        /// The definitions path.
+        /// </value>
+        public static string SamplesPath
+        {
+            get
+            {
+                return Environment.GetEnvironmentVariable("GRIB_SAMPLES_PATH") + "";
+            }
+            set
+            {
+                PutEnvVar("GRIB_SAMPLES_PATH", value);
+            }
+        }
 
         /// <summary>
         /// Gets the grib_api version wrapped by this library.
@@ -201,7 +210,7 @@ namespace Grib.Api
         {
             get
             {
-				if (!Initialized) { Init(); }
+                if (!Initialized) { Init(); }
 
                 string version = GribApiProxy.GribGetApiVersion().ToString();
                 string major = version[0].ToString();

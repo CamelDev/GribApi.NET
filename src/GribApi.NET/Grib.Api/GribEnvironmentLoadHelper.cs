@@ -1,4 +1,18 @@
-﻿using Grib.Api.Interop;
+﻿// Copyright 2017 Eric Millin
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using Grib.Api.Interop;
 using Grib.Api.Interop.Util;
 using System;
 using System.IO;
@@ -14,7 +28,7 @@ namespace Grib.Api
 
             if (!TryFindBootstrapLibrary(out path))
             {
-                throw new FileNotFoundException("Could not find Grib.Api.Native. If you're using ASP.NET or NUnit, this is usually caused by shadow copying. Please see GribApi.NET's documentation for help.");
+                throw new FileNotFoundException("Could not find Grib.Api.Native. Please see GribApi.NET's documentation for help.");
             }
 
             return Win32.LoadWin32Library(path);
@@ -44,9 +58,7 @@ namespace Grib.Api
         {
             path = "";
 			target += "";
-            string varDef = Environment.GetEnvironmentVariable("GRIB_API_DIR_ROOT") + "";
 
-            string envDir = Path.Combine(varDef, target);
             string thisDir = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)+"", target);
             string baseDomainDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory+"", target);
 			string relDomainDir = Path.Combine(AppDomain.CurrentDomain.RelativeSearchPath+"", target);
@@ -54,7 +66,6 @@ namespace Grib.Api
 			return TryBuildGriApiPath(thisDir, out path) ||
 				   TryBuildGriApiPath(relDomainDir, out path) ||      // try using the directory that contains this binary
 				   TryBuildGriApiPath(baseDomainDir, out path) ||	  // try using the directory that contains the exe
-				   TryBuildGriApiPath(envDir, out path) ||            // try using environment variable
 				   TryBuildGriApiPath(target, out path);              // try using relative path;      
         }
 
